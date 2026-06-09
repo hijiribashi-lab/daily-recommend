@@ -14,6 +14,11 @@ declare global {
     drData?: {
       root: string;
       nonce: string;
+      categories?: { slug: string; name: string }[];
+      config?: {
+        targetHour: number;
+        maxPosts: number;
+      };
     };
   }
 }
@@ -26,7 +31,17 @@ export const App = () => {
   const [recommendedPosts, setRecommendedPosts] = useState<Post[]>([]);
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
 
+  // --- 💡 追加：プラグインの共通設定ステート ---
+  const [targetHour, setTargetHour] = useState<number>(
+    window.drData?.config?.targetHour ?? 5,
+  );
+  const [maxPosts, setMaxPosts] = useState<number>(
+    window.drData?.config?.maxPosts ?? 6,
+  );
+  const [isSavingSettings, setIsSavingSettings] = useState<boolean>(false);
+
   // --- モーダル内のステート ---
+  const [searchInputValue, setSearchInputValue] = useState<string>("");
   const [searchKeyword, setSearchKeyword] = useState<string>("");
   const [selectedCategory, setSelectedCategory] = useState<string>("");
   const [modalPosts, setModalPosts] = useState<Post[]>([]);
@@ -37,7 +52,26 @@ export const App = () => {
   // 無限スクロールの最下部を監視するためのRef
   const observerRef = useRef<HTMLDivElement | null>(null);
 
-  // --- 💡【修正】1. カレンダーで選んだ日付の保存データをWPから取得する関数 ---
+  // 検索キーワードのデバウンス処理（500ms入力が止まったら反映）
+  useEffect(() => {
+    if (!isModalOpen) return;
+
+    const timer = setTimeout(() => {
+      setSearchKeyword(searchInputValue);
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [searchInputValue, isModalOpen]);
+
+  // モーダルが閉じられたら検索入力をリセット
+  useEffect(() => {
+    if (!isModalOpen) {
+      setSearchInputValue("");
+      setSearchKeyword("");
+    }
+  }, [isModalOpen]);
+
+  // --- 1. 選んだ日付の保存データをおすすめ枠に取得する ---
   const fetchRecommendedPosts = useCallback(async (date: string) => {
     const apiRoot = window.drData?.root || "/wp-json/";
     const nonce = window.drData?.nonce || "";
@@ -57,18 +91,18 @@ export const App = () => {
       if (!response.ok) throw new Error("データの取得に失敗しました。");
 
       const data = await response.json();
-      setRecommendedPosts(data.posts); // その日の最大6件をセット
+      setRecommendedPosts(data.posts);
     } catch (error) {
       console.error("Fetch recommend error:", error);
     }
   }, []);
 
-  // 日付が切り替わるたびに自動でその日のデータを再取得する
+  // 日付が切り替わるたびにデータを再取得
   useEffect(() => {
     fetchRecommendedPosts(selectedDate);
   }, [selectedDate, fetchRecommendedPosts]);
 
-  // --- 2. モーダル内の無限スクロール用：記事一覧を12件ずつ取得する関数 ---
+  // --- 2. モーダル内：記事一覧を12件ずつ取得する ---
   const loadMorePosts = useCallback(async () => {
     if (isLoading || !hasMore) return;
     setIsLoading(true);
@@ -94,7 +128,6 @@ export const App = () => {
       if (!response.ok) throw new Error("記事データの取得に失敗しました。");
 
       const data = await response.json();
-
       setModalPosts((prev) => [...prev, ...data.posts]);
       setPage((prev) => prev + 1);
       setHasMore(data.has_more);
@@ -105,7 +138,7 @@ export const App = () => {
     }
   }, [page, searchKeyword, selectedCategory, isLoading, hasMore]);
 
-  // 検索条件やモーダルの開閉が変わったらモーダル内のリストをリセット
+  // 検索条件が変わったらリストをリセット
   useEffect(() => {
     if (!isModalOpen) return;
     setModalPosts([]);
@@ -145,8 +178,11 @@ export const App = () => {
 
   // --- 3. おすすめ枠への記事追加・削除 ---
   const handleSelectPost = (post: Post) => {
-    if (recommendedPosts.length >= 6) {
-      alert("今日のおすすめ記事は最大6件までです。");
+    // 💡 修正：最大件数を動的なmaxPostsを参照するように変更
+    if (recommendedPosts.length >= maxPosts) {
+      alert(
+        `今日のおすすめ記事は最大${maxPosts}件までです。変更したい場合は共通設定を調整してください。`,
+      );
       return;
     }
     if (recommendedPosts.some((p) => p.id === post.id)) {
@@ -161,7 +197,7 @@ export const App = () => {
     setRecommendedPosts(recommendedPosts.filter((post) => post.id !== postId));
   };
 
-  // --- 4. 「設定を保存」ボタンを押したときの処理 ---
+  // --- 4. 「設定を保存」ボタンを押したときの処理（日付に紐づく記事ID） ---
   const handleSave = async () => {
     const apiRoot = window.drData?.root || "/wp-json/";
     const nonce = window.drData?.nonce || "";
@@ -195,49 +231,192 @@ export const App = () => {
     }
   };
 
+  // --- 💡 5. 【新規】更新時間・最大件数の「共通設定」を保存する処理 ---
+  const handleSaveSettings = async () => {
+    if (isSavingSettings) return;
+    setIsSavingSettings(true);
+
+    const apiRoot = window.drData?.root || "/wp-json/";
+    const nonce = window.drData?.nonce || "";
+
+    try {
+      const response = await fetch(
+        `${apiRoot}daily-recommend/v1/save-settings`,
+        {
+          method: "POST",
+          headers: {
+            "X-WP-Nonce": nonce,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            target_hour: targetHour,
+            max_posts: maxPosts,
+          }),
+        },
+      );
+
+      if (!response.ok) throw new Error("設定の保存に失敗しました。");
+
+      const data = await response.json();
+      if (data.success) {
+        alert(
+          "⚙️ プラグインの共通設定を更新し、トップページのLiteSpeedキャッシュをパージしました！",
+        );
+        // 💡 登録済み件数が新しい上限を超えていたらトリミングするか警告を促すための考慮
+        if (recommendedPosts.length > maxPosts) {
+          setRecommendedPosts(recommendedPosts.slice(0, maxPosts));
+        }
+      }
+    } catch (error) {
+      alert("❌ 設定の保存中にエラーが発生しました。");
+      console.error("Save settings error:", error);
+    } finally {
+      setIsSavingSettings(false);
+    }
+  };
+
   return (
     <div style={{ padding: "10px 20px 20px 0", maxWidth: "1200px" }}>
       <p style={{ color: "#666", marginBottom: "20px" }}>
-        マニュアルでお勧め表示する記事を日ごとにスケジュール登録できます。毎日AM5:00に自動で切り替わります。
+        マニュアルでお勧め表示する記事を日ごとにスケジュール登録できます。設定された更新時間にトップページのキャッシュが自動パージされ、記事が切り替わります。
       </p>
 
       <div style={{ display: "flex", gap: "20px", alignItems: "flex-start" }}>
-        {/* 左側：カレンダー */}
+        {/* 左側：操作パネル（カレンダー ＆ 💡新規：共通設定） */}
         <div
           style={{
             flex: "1",
-            minWidth: "280px",
-            background: "#fff",
-            padding: "20px",
-            borderRadius: "4px",
-            border: "1px solid #ccd0d4",
+            minWidth: "300px",
+            display: "flex",
+            flexDirection: "column",
+            gap: "20px",
           }}
         >
-          <h3
+          {/* 日付選択カード */}
+          <div
             style={{
-              margin: "0 0 15px 0",
-              fontSize: "14px",
-              borderBottom: "1px solid #eee",
-              paddingBottom: "8px",
+              background: "#fff",
+              padding: "20px",
+              borderRadius: "4px",
+              border: "1px solid #ccd0d4",
             }}
           >
-            ① 日付を選択
-          </h3>
-          <input
-            type="date"
-            value={selectedDate}
-            onChange={(e) => setSelectedDate(e.target.value)}
+            <h3
+              style={{
+                margin: "0 0 15px 0",
+                fontSize: "14px",
+                borderBottom: "1px solid #eee",
+                paddingBottom: "8px",
+              }}
+            >
+              ① 日付を選択
+            </h3>
+            <input
+              type="date"
+              value={selectedDate}
+              onChange={(e) => setSelectedDate(e.target.value)}
+              style={{
+                width: "100%",
+                padding: "8px",
+                fontSize: "14px",
+                borderRadius: "4px",
+                border: "1px solid #8c8f94",
+              }}
+            />
+            <div style={{ marginTop: "15px", fontSize: "13px", color: "#555" }}>
+              選択中の日付:{" "}
+              <strong style={{ color: "#0073aa" }}>{selectedDate}</strong>
+            </div>
+          </div>
+
+          {/* 💡新規：共通設定カード */}
+          <div
             style={{
-              width: "100%",
-              padding: "8px",
-              fontSize: "14px",
+              background: "#fff",
+              padding: "20px",
               borderRadius: "4px",
-              border: "1px solid #8c8f94",
+              border: "1px solid #ccd0d4",
             }}
-          />
-          <div style={{ marginTop: "15px", fontSize: "13px", color: "#555" }}>
-            選択中の日付:{" "}
-            <strong style={{ color: "#0073aa" }}>{selectedDate}</strong>
+          >
+            <h3
+              style={{
+                margin: "0 0 15px 0",
+                fontSize: "14px",
+                borderBottom: "1px solid #eee",
+                paddingBottom: "8px",
+              }}
+            >
+              ⚙️ プラグイン共通設定
+            </h3>
+
+            <div style={{ marginBottom: "12px" }}>
+              <label
+                style={{
+                  display: "block",
+                  fontSize: "12px",
+                  color: "#2c3338",
+                  fontWeight: "bold",
+                  marginBottom: "4px",
+                }}
+              >
+                日付切り替え時間
+              </label>
+              <select
+                value={targetHour}
+                onChange={(e) => setTargetHour(parseInt(e.target.value))}
+                style={{
+                  width: "100%",
+                  padding: "6px",
+                  borderRadius: "4px",
+                  border: "1px solid #8c8f94",
+                }}
+              >
+                {[...Array(24)].map((_, i) => (
+                  <option key={i} value={i}>
+                    {i === 0 ? "毎日 0:00 (深夜)" : `毎日 ${i}:00`}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div style={{ marginBottom: "15px" }}>
+              <label
+                style={{
+                  display: "block",
+                  fontSize: "12px",
+                  color: "#2c3338",
+                  fontWeight: "bold",
+                  marginBottom: "4px",
+                }}
+              >
+                最大表示件数
+              </label>
+              <select
+                value={maxPosts}
+                onChange={(e) => setMaxPosts(parseInt(e.target.value))}
+                style={{
+                  width: "100%",
+                  padding: "6px",
+                  borderRadius: "4px",
+                  border: "1px solid #8c8f94",
+                }}
+              >
+                {[...Array(12)].map((_, i) => (
+                  <option key={i + 1} value={i + 1}>
+                    {i + 1} 件
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <button
+              onClick={handleSaveSettings}
+              className="button button-secondary"
+              disabled={isSavingSettings}
+              style={{ width: "100%", fontWeight: "bold", textAlign: "center" }}
+            >
+              {isSavingSettings ? "保存中..." : "共通設定を保存"}
+            </button>
           </div>
         </div>
 
@@ -262,7 +441,7 @@ export const App = () => {
             }}
           >
             <h3 style={{ margin: 0, fontSize: "14px" }}>
-              ② おすすめ記事（最大6件）
+              ② おすすめ記事（最大 {maxPosts} 件）
             </h3>
             <div>
               <button
@@ -272,7 +451,7 @@ export const App = () => {
               >
                 設定を保存
               </button>
-              {recommendedPosts.length < 6 && (
+              {recommendedPosts.length < maxPosts && (
                 <button
                   onClick={() => setIsModalOpen(true)}
                   className="button button-secondary"
@@ -402,7 +581,8 @@ export const App = () => {
               }}
             >
               <h3 style={{ margin: 0, fontSize: "16px" }}>
-                記事一覧から選択 ({recommendedPosts.length} / 6件選択中)
+                記事一覧から選択 ({recommendedPosts.length} / {maxPosts}
+                件選択中)
               </h3>
               <button
                 onClick={() => setIsModalOpen(false)}
@@ -430,8 +610,8 @@ export const App = () => {
               <input
                 type="text"
                 placeholder="キーワード検索..."
-                value={searchKeyword}
-                onChange={(e) => setSearchKeyword(e.target.value)}
+                value={searchInputValue}
+                onChange={(e) => setSearchInputValue(e.target.value)}
                 style={{
                   flex: 2,
                   padding: "6px 10px",
@@ -450,9 +630,11 @@ export const App = () => {
                 }}
               >
                 <option value="">すべてのカテゴリー</option>
-                <option value="notice">お知らせ</option>
-                <option value="event">イベント</option>
-                <option value="column">コラム</option>
+                {window.drData?.categories?.map((cat) => (
+                  <option key={cat.slug} value={cat.slug}>
+                    {cat.name}
+                  </option>
+                ))}
               </select>
             </div>
 
