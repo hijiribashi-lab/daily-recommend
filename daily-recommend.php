@@ -281,9 +281,7 @@ function dr_save_settings_callback($request)
   update_option('dr_setting_max_posts', $max_posts);
 
   // 💡 設定が変更されたら、古いキャッシュが残らないように即座にLSCacheをクリア
-  if (class_exists('LiteSpeed\Purge')) {
-    LiteSpeed\Purge::purge('H.front');
-  }
+  do_action('litespeed_purge', 'H.front');
 
   return new WP_REST_Response(array('success' => true, 'message' => '共通設定を保存しました。'), 200);
 }
@@ -329,9 +327,7 @@ function dr_litespeed_cache_auto_purge()
   // 💡 最後にパージした日付と、今表示すべき日付が異なる場合（＝日付変更後、初のアクセス）
   if ($target_date !== $last_purged_date) {
     // トップページのキャッシュのみをピンポイントで強制削除
-    if (class_exists('LiteSpeed\Purge')) {
-      LiteSpeed\Purge::purge('H.front');
-    }
+    do_action('litespeed_purge', 'H.front');
     // フラグを更新し、1日に何度もパージが走るのを防ぐ（サーバー負荷軽減）
     update_option('dr_lscache_last_purged_date', $target_date);
   }
